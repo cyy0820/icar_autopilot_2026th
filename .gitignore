@@ -1,0 +1,25 @@
+# 编译产物
+build/
+*.o
+*.a
+*.so
+
+# 板卡上的备份（同模型的不同版本，每份几十 MB）
+res/models/yolov3_mobilenet_v1_15cls_20261021/
+res/models/yolov3_mobilenet_v1_bak_20261021/
+res/models/yolov3_mobilenet_v1_past/
+backup_*/
+
+# 原始素材（现场采集 / 标定数据，体积大，不进仓库）
+res/samples/
+res/calibration/
+
+# 运行日志
+*.log
+
+# 编辑器 / 系统
+.vscode/*.log
+.DS_Store
+Thumbs.db
+__pycache__/
+*.pyc
