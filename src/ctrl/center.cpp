@@ -33,6 +33,9 @@ using namespace std;
 void Center::fitting(shared_ptr<Params> &params)
 {
 
+    // 出界检查采用控制中心裁剪前的边线，避免有效行裁剪造成“假丢线”。
+    const size_t edgeCountLeft = params->track->pointsEdgeLeft.size();
+    const size_t edgeCountRight = params->track->pointsEdgeRight.size();
     sigmaCenter = 0;
     params->ctrl.center = COLSIMAGE / 2; // 控制中心
     if (!params->ctrl.fitting)           // 除停车场特殊绘制
@@ -184,9 +187,16 @@ void Center::fitting(shared_ptr<Params> &params)
     else
         sigmaCenter = 1000;
 
-    // 车辆冲出赛道检测
-    if (!params->ctrl.parking)
-        derailmentCheck(params->track->pointsEdgeLeft, params->track->pointsEdgeRight);
+    // 停车场主动离开赛道、出库冷却期间不累积丢线计数。
+    if (params->ctrl.parking)
+        countOut = 0;
+    else if (params->ctrl.outlineCooldown > 0)
+    {
+        params->ctrl.outlineCooldown--;
+        countOut = 0;
+    }
+    else
+        derailmentCheck(edgeCountLeft, edgeCountRight);
 }
 
 /**
@@ -533,30 +543,22 @@ void Center::validRowsCal(vector<PointX> pointsEdgeLeft, vector<PointX> pointsEd
 /**
  * @brief 车辆冲出赛道检测（保护车辆）
  *
- * @param pointsEdgeLeft
- * @param pointsEdgeRight
- * @return true
- * @return false
+ * @param edgeCountLeft 控制中心裁剪前的左边线点数
+ * @param edgeCountRight 控制中心裁剪前的右边线点数
  */
-void Center::derailmentCheck(vector<PointX> pointsEdgeLeft, vector<PointX> pointsEdgeRight)
+void Center::derailmentCheck(size_t edgeCountLeft, size_t edgeCountRight)
 {
-    if (pointsEdgeLeft.size() < 30 && pointsEdgeRight.size() < 30) // 防止车辆冲出赛道
+    if (edgeCountLeft < 30 && edgeCountRight < 30)
     {
         countOut++;
-        timeout = 0;
-        if (countOut > 20)
+        if (countOut > 20) // 保留连续21次丢线退出保护，避免不同路段的短暂丢线累积
         {
             printf("-----> ICAR Outline!!! <-----\n");
-            exit(0); // 程序退出
+            exit(0);
         }
     }
     else
     {
-        timeout++;
-        if (timeout > 50)
-        {
-            countOut = 0;
-            timeout = 50;
-        }
+        countOut = 0; // 任意一侧边线恢复立即清零
     }
 }

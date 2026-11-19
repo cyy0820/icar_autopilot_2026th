@@ -290,8 +290,11 @@ private:
         if (params->config.busy)
         {
             fsmFactory.busy->run(img);
-            if (params->mode == FsmMode::NORMAL)
-                params->mode = fsmFactory.busy->getMode();
+            const FsmMode busyMode = fsmFactory.busy->getMode();
+            // 施工区已激活时覆盖普通慢行，保证使用velBusy并屏蔽区域外的避障补线。
+            if (busyMode == FsmMode::BUSY &&
+                (params->mode == FsmMode::NORMAL || params->mode == FsmMode::SLOW))
+                params->mode = busyMode;
             // 施工区鸣笛（每秒3次，间隔10帧≈333ms）
             if (params->busyAlertCountdown > 0)
             {

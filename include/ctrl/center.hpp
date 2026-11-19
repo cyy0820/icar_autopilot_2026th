@@ -47,13 +47,12 @@ public:
 
 private:
     string style = "";
-    int countOut = 0;
-    int timeout = 0;
+    int countOut = 0; // 连续丢线次数，边线恢复即清零
 
     void showMode(Mat &img, FsmMode mode);
     uint16_t searchBreakLeftDown(vector<PointX> pointsEdgeLeft);
     uint16_t searchBreakRightDown(vector<PointX> pointsEdgeRight);
     vector<PointX> centerCompute(vector<PointX> pointsEdge, int side);
     void validRowsCal(vector<PointX> pointsEdgeLeft, vector<PointX> pointsEdgeRight);
-    void derailmentCheck(vector<PointX> pointsEdgeLeft, vector<PointX> pointsEdgeRight);
+    void derailmentCheck(size_t edgeCountLeft, size_t edgeCountRight);
 };

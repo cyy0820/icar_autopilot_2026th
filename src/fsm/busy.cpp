@@ -64,64 +64,144 @@ void FsmBusy::run(Mat &img)
 
     resultObs = PredictResult();
 
+    // 调试：步骤变化 + ENABLE 阶段的箭头情况（每 15 帧一行，防刷屏）
+    {
+        static int lastStep = -1;
+        if ((int)step != lastStep)
+        {
+            printf("[Busy] step -> %d (lap=%d)\n", (int)step, params->currentLap);
+            lastStep = (int)step;
+        }
+        static int dbgCnt = 0;
+        if (step == Step::ENABLE && (++dbgCnt % 15 == 0))
+        {
+            int nBusy = 0, nChoice = 0;
+            int bestY = 0, bestCenterY = -1;
+            for (int i = 0; i < (int)params->results.size(); i++)
+            {
+                if (params->results[i].type == LABEL_BUSY)
+                    nBusy++;
+                if (params->results[i].type == LABEL_CHOICE)
+                {
+                    nChoice++;
+                    if (params->results[i].y > bestY &&
+                        params->results[i].width < 120 && params->results[i].height < 120)
+                    {
+                        bestY = params->results[i].y;
+                        bestCenterY = bestY + params->results[i].height / 2;
+                    }
+                }
+            }
+            printf("[Busy-dbg] timeout=%d busy=%d choice=%d centerY=%d (need>%d)\n",
+                   timeout, nBusy, nChoice, bestCenterY, (int)(ROWSIMAGE * 0.35));
+        }
+    }
+
     switch (step)
     {
     case Step::NONE: // AI未识别：等待施工区标志(busy)
     {
-        // 连续2帧确认识别到施工区标志
+        // 只要有 busy 牌子出现在画面里就累计（不要求够近、不要求连续）：
+        // 远处小牌常常只闪现一两帧，真正的"转向时机"交给 ENABLE 阶段的 choice 箭头。
         bool busyNow = false;
         for (int i = 0; i < params->results.size(); i++)
-        {
-            if (params->results[i].type == LABEL_BUSY) // 施工区标志
+            if (params->results[i].type == LABEL_BUSY)
             {
                 busyNow = true;
                 break;
             }
+
+        // 调试：每 15 帧报一次，并把画面里前 6 个检测框全打出来（看施工区附近模型认到什么）
+        {
+            static int nCnt = 0;
+            if (++nCnt % 15 == 0)
+            {
+                int nBusy = 0, bestBottom = -1;
+                char buf[256] = {0};
+                int off = 0;
+                for (int i = 0; i < (int)params->results.size() && i < 6; i++)
+                {
+                    const PredictResult &r = params->results[i];
+                    if (r.type == LABEL_BUSY)
+                    {
+                        nBusy++;
+                        int b = r.y + r.height;
+                        if (b > bestBottom)
+                            bestBottom = b;
+                    }
+                    off += snprintf(buf + off, sizeof(buf) - off, " %d(%.2f,%d,%d,%dx%d)",
+                                    r.type, r.score, r.x, r.y, r.width, r.height);
+                    if (off > (int)sizeof(buf) - 60)
+                        break;
+                }
+                printf("[Busy-dbg] NONE busy=%d bestBottom=%d countRec=%d |%s\n",
+                       nBusy, bestBottom, countRec, buf);
+            }
         }
+
         if (busyNow)
             countRec++;
-        else
-            countRec = 0;
+        else if (countRec > 0)
+            countRec--; // 抖动容忍：漏一帧不清零
         if (countRec >= 3)
             setStep(Step::ENABLE); // 确认进入施工区
         break;
     }
 
-    case Step::ENABLE: // 已确认施工区
+    case Step::ENABLE: // 与停车场ENABLE一致，区域标志改为施工区busy
     {
-        timeout++;
-        // 搜索最底行的双箭头(离车最近)
+        countSes++;
+        if (!params->ctrl.stop)
+            timeout++;
+        if (timeout > 80)
+        {
+            reset();
+            break;
+        }
+
+        if (findSymbols(params->results, LABEL_BUSY))
+            countSes = 0;
+        if (countSes > 30) // 与停车场相同：区域标志消失后的转向兜底
+            setStep(Step::FORKIN);
+
         PredictResult choice;
         choice.score = 0;
         choice.y = 0;
         for (int i = 0; i < params->results.size(); i++)
         {
-            if (params->results[i].type == LABEL_CHOICE) // 双向箭头
+            if (params->results[i].type == LABEL_CHOICE)
             {
                 if (params->results[i].y > choice.y &&
                     params->results[i].width < 120 && params->results[i].height < 120)
-                    choice = params->results[i]; // 取最底行
+                    choice = params->results[i];
             }
         }
-        if (choice.score > 0) // 检测到箭头
+        if (choice.score > 0)
         {
-            timeout = 0;
-            if ((choice.y + choice.height / 2) > ROWSIMAGE * 0.33) // 箭头靠近
+            countSes = 0; // 看到入口箭头时仅根据位置触发，和停车场一致
+            if ((choice.y + choice.height / 2) > ROWSIMAGE * 0.35)
                 countRec++;
             if (countRec > 1)
-                setStep(Step::FORKIN); // 左拐进区
+                setStep(Step::FORKIN);
         }
-        if (timeout > 30)       // 超时未等到箭头：错失，复位
-            setStep(Step::NONE); // 复位
         break;
     }
 
-    case Step::FORKIN: // 进区岔路转向（左拐）
+    case Step::FORKIN: // 使用停车场同款左转补线，施工区不根据gate结束转向
     {
+        params->busyZone = true; // 施工区限速驻留：出区后继续保持，直到下一圈斑马线换圈
         timeout++;
-        replanTracking(true);      // 车道线重绘（左转进入）
-        if (timeout > 30)          // 转向超时
-            setStep(Step::RUNNING); // 进入区内巡线
+        replanTracking(true);
+        const bool finished = timeout > 89; // 入弯保持约3秒（30fps × 3s = 90帧）
+        if (timeout == 1 || finished)
+        {
+            printf("[Busy-turn] lap=%d parking-style hold=%d/90 speed=%.2f end=%s\n",
+                   params->currentLap, timeout, params->config.velBusy,
+                   finished ? "max-hold" : "none");
+            fflush(stdout);
+        }
+        if (finished)
+            setStep(Step::RUNNING);
         break;
     }
 
@@ -143,6 +223,12 @@ void FsmBusy::run(Mat &img)
             countRec++; // 左转标志开到画面下
         if (countRec > 2)
             setStep(Step::FORKOUT); // 出区左拐
+        if (timeout > 120)          // 兜底：区内 4 秒没等到左转标志也要出区，否则会永远停在 BUSY（0.4 巡航）
+        {
+            timeout = 0;
+            countRec = 0;
+            setStep(Step::FORKOUT);
+        }
         break;
     }
 
@@ -166,7 +252,7 @@ void FsmBusy::run(Mat &img)
         if (leftSign)
             timeout = 0; // 左转标志未丢失，继续转向
 
-        if (timeout > 14) // 转向超时
+        if (timeout > 29) // 转向超时（延长0.5s：14帧 + 15帧）
         {
             setStep(Step::NONE);       // 回到起始状态
         }
@@ -227,10 +313,11 @@ void FsmBusy::replanTracking(bool left)
         vector<PointX> repairPoints = {startPoint, midPoint, endPoint};
         vector<PointX> modifyEdge = Bezier(0.02, repairPoints); // 三阶贝塞尔曲线拟合
         params->track->pointsEdgeLeft = modifyEdge;
-        // 右车道线
-        startPoint = PointX(ROWSIMAGE - 10, COLSIMAGE * 0.8);                                  // 补线起点:固定左下角
-        endPoint = PointX(ROWSIMAGE / 3, 30);                                                   // 补线终点
-        midPoint = PointX((startPoint.x + endPoint.x) * 0.3, (startPoint.y + endPoint.y) / 2); // 补线中点
+        // 右车道线：与停车场路口左转replanTracking()使用相同控制点
+        startPoint = PointX(ROWSIMAGE - 10, COLSIMAGE * 0.8);
+        endPoint = PointX(ROWSIMAGE / 3, 30);
+        midPoint = PointX((startPoint.x + endPoint.x) * 0.5,
+                         (startPoint.y + endPoint.y) * 0.35);
         repairPoints = {startPoint, midPoint, endPoint};
         modifyEdge = Bezier(0.02, repairPoints); // 三阶贝塞尔曲线拟合
         params->track->pointsEdgeRight = modifyEdge;
@@ -317,4 +404,5 @@ void FsmBusy::resetLap()
 {
     reset();
     manualTakeover = false;
+    params->busyZone = false; // 换圈（识别到斑马线）后解除施工区限速
 }
